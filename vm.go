@@ -555,9 +555,6 @@ func (vm *VirtualMachineSpec) AssignDevice(ctx context.Context, deviceID string)
 		Settings:     targetDevice,
 	}
 
-	// WCOW (when supported) does not require a guest request as part of the
-	// device assignment
-	//if system.os != "windows" {
 	// for LCOW, we need to make sure that specific paths relating to the
 	// device exist so they are ready to be used by later
 	// work in openGCS
@@ -568,7 +565,6 @@ func (vm *VirtualMachineSpec) AssignDevice(ctx context.Context, deviceID string)
 			VMBusGUID: vmBusGUID,
 		},
 	}
-	//}
 
 	if err := system.Modify(ctx, request); err != nil {
 		return "", err
