@@ -8,8 +8,10 @@ import (
 	"log"
 	"time"
 
+	"github.com/Microsoft/hcsshim"
 	"github.com/Microsoft/hcsshim/internal/hcs"
 	hcsschema "github.com/Microsoft/hcsshim/internal/schema2"
+	"github.com/Microsoft/hcsshim/internal/wclayer"
 )
 
 var (
@@ -25,9 +27,17 @@ type VirtualMachineSpec struct {
 	system    *hcs.System
 }
 
-func CreateVirtualMachineSpec(name, id, vhdPath, isoPath, owner string, memoryInMB, processorCount int, vnicId, macAddress string) (*VirtualMachineSpec, error) {
+func CreateVirtualMachineSpec(opts *hcsshim.VirtualMachineOptions) (*VirtualMachineSpec, error) {
+	// Ensure the VM has access, we use opts.Id to create VM
+	if err := wclayer.GrantVmAccess(opts.Id, opts.VhdPath); err != nil {
+		return nil, err
+	}
+	if err := wclayer.GrantVmAccess(opts.Id, opts.IsoPath); err != nil {
+		return nil, err
+	}
+
 	spec := &hcsschema.ComputeSystem{
-		Owner: owner,
+		Owner: opts.Owner,
 		SchemaVersion: &hcsschema.Version{
 			Major: 2,
 			Minor: 1,
@@ -45,56 +55,99 @@ func CreateVirtualMachineSpec(name, id, vhdPath, isoPath, owner string, memoryIn
 			},
 			ComputeTopology: &hcsschema.Topology{
 				Memory: &hcsschema.Memory2{
-					SizeInMB: int32(memoryInMB),
+					SizeInMB:        int32(opts.MemoryInMB),
+					AllowOvercommit: opts.AllowOvercommit,
 				},
 				Processor: &hcsschema.Processor2{
-					Count: int32(processorCount),
+					Count: int32(opts.ProcessorCount),
 				},
 			},
 			Devices: &hcsschema.Devices{
 				Scsi: map[string]hcsschema.Scsi{
-					"primary": hcsschema.Scsi{
+					"primary": {
 						Attachments: map[string]hcsschema.Attachment{
-							"0": hcsschema.Attachment{
-								Path:  vhdPath,
+							"0": {
+								Path:  opts.VhdPath,
 								Type_: "VirtualDisk",
 							},
-							"1": hcsschema.Attachment{
-								Path:  isoPath,
+							"1": {
+								Path:  opts.IsoPath,
 								Type_: "Iso",
 							},
 						},
 					},
 				},
 				NetworkAdapters: map[string]hcsschema.NetworkAdapter{},
+				Plan9:           &hcsschema.Plan9{},
 			},
-			// GuestConnection: &hcsschema.GuestConnection{
-			//	UseVsock:            true,
-			//	UseConnectedSuspend: true,
-			//},
 		},
 	}
 
-	if len(vnicId) > 0 {
+	if len(opts.VnicId) > 0 {
 		spec.VirtualMachine.Devices.NetworkAdapters["ext"] = hcsschema.NetworkAdapter{
-			EndpointId: vnicId,
-			MacAddress: macAddress,
+			EndpointId: opts.VnicId,
+			MacAddress: opts.MacAddress,
+		}
+	}
+
+	if opts.UseGuestConnection {
+		spec.VirtualMachine.GuestConnection = &hcsschema.GuestConnection{
+			UseVsock:            true,
+			UseConnectedSuspend: true,
 		}
 	}
 
 	return &VirtualMachineSpec{
 		Spec: spec,
-		ID:   id,
-		Name: name,
+		ID:   opts.Id,
+		Name: opts.Name,
 	}, nil
 }
 
 func main() {
-	vmspec, err := CreateVirtualMachineSpec("vmname", "vm-id", "c:\\temp\\AzureIoTEdgeForLinux-v1-EFLOW.vhdx", "c:\\temp\\seed-static.iso", "vmowner", 1024, 1, "JSHIH-DELL2-EFLOWInterface", "vmmacAddress")
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+
+	vmOptions := hcsshim.VirtualMachineOptions{
+		Name:               "static-ip-testVm",
+		Id:                 "797BB510-E665-11EB-B250-A4BB6D44E185",
+		VhdPath:            "c:\\temp\\AzureIoTEdgeForLinux-v1-EFLOW.vhdx",
+		IsoPath:            "c:\\temp\\seed-static.iso",
+		Owner:              "WssdTest",
+		MemoryInMB:         1024,
+		ProcessorCount:     1,
+		VnicId:             "5258b965-465c-4ab3-928f-231d0bdaa2cd",
+		MacAddress:         "00-15-5D-35-E9-A4",
+		UseGuestConnection: true,
+	}
+
+	vmspec, err := CreateVirtualMachineSpec(&vmOptions)
 	if err != nil {
 		log.Printf("CreateVirtualMachineSpec failed: err = %v", err)
+		return
 	}
-	log.Printf("vmspec=%v", vmspec)
+
+	hcsDocumentB, err := json.Marshal(vmspec.Spec)
+	if err != nil {
+		log.Printf("json.Marshal failed: err = %v", err)
+		return
+	}
+
+	hcsDocument := string(hcsDocumentB)
+	log.Printf("vmspec=%v", hcsDocument)
+
+	system, err := hcs.CreateComputeSystem(ctx, "797BB510-E665-11EB-B250-A4BB6D44E185", vmspec.Spec)
+	if err != nil {
+		log.Printf("hcs.CreateComputeSystem failed: err = %v", err)
+		return
+	}
+	defer system.Close()
+
+	if err = system.Start(ctx); err != nil {
+		log.Printf("system.Start failed: err = %v", err)
+		return
+	}
+
 }
 
 func modifyComputeSystem(vmName string, jsonFileName string) (err error) {
