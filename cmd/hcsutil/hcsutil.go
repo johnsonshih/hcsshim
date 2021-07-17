@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io/ioutil"
 	"log"
+	"os"
 	"time"
 
 	"github.com/Microsoft/hcsshim"
@@ -105,52 +107,24 @@ func CreateVirtualMachineSpec(opts *hcsshim.VirtualMachineOptions) (*VirtualMach
 }
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
-	defer cancel()
-
-	vmOptions := hcsshim.VirtualMachineOptions{
-		Name:               "static-ip-testVm",
-		Id:                 "797BB510-E665-11EB-B250-A4BB6D44E185",
-		VhdPath:            "c:\\temp\\AzureIoTEdgeForLinux-v1-EFLOW.vhdx",
-		IsoPath:            "c:\\temp\\seed-static.iso",
-		Owner:              "WssdTest",
-		MemoryInMB:         1024,
-		ProcessorCount:     1,
-		VnicId:             "5258b965-465c-4ab3-928f-231d0bdaa2cd",
-		MacAddress:         "00-15-5D-35-E9-A4",
-		UseGuestConnection: true,
+	flag.Parse()
+	if flag.NArg() != 0 || len(*vmNameFlag) == 0 || len(*jsonFileNameFlag) == 0 {
+		flag.Usage()
+		os.Exit(1)
 	}
 
-	vmspec, err := CreateVirtualMachineSpec(&vmOptions)
+	system, err := bootComputeSystem(*vmNameFlag, *jsonFileNameFlag)
 	if err != nil {
-		log.Printf("CreateVirtualMachineSpec failed: err = %v", err)
-		return
-	}
-
-	hcsDocumentB, err := json.Marshal(vmspec.Spec)
-	if err != nil {
-		log.Printf("json.Marshal failed: err = %v", err)
-		return
-	}
-
-	hcsDocument := string(hcsDocumentB)
-	log.Printf("vmspec=%v", hcsDocument)
-
-	system, err := hcs.CreateComputeSystem(ctx, "797BB510-E665-11EB-B250-A4BB6D44E185", vmspec.Spec)
-	if err != nil {
-		log.Printf("hcs.CreateComputeSystem failed: err = %v", err)
-		return
+		os.Exit(1)
 	}
 	defer system.Close()
 
-	if err = system.Start(ctx); err != nil {
-		log.Printf("system.Start failed: err = %v", err)
-		return
-	}
-
+	fmt.Printf("Press any key to stop!!!")
+	fmt.Scanln()
+	os.Exit(0)
 }
 
-func modifyComputeSystem(vmName string, jsonFileName string) (err error) {
+func bootComputeSystem(vmName string, jsonFileName string) (_ *hcs.System, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
@@ -160,7 +134,7 @@ func modifyComputeSystem(vmName string, jsonFileName string) (err error) {
 		return
 	}
 
-	var request hcsschema.ModifySettingRequest
+	var request hcsschema.ComputeSystem
 
 	err = json.Unmarshal(requestContent, &request)
 	if err != nil {
@@ -168,21 +142,18 @@ func modifyComputeSystem(vmName string, jsonFileName string) (err error) {
 		return
 	}
 
-	system, err := hcs.OpenComputeSystem(ctx, vmName)
+	system, err := hcs.CreateComputeSystem(ctx, vmName, request)
 	if err != nil {
-		log.Printf("OpenComputeSystem failed, err = %v", err)
-		return
-	}
-	defer system.Close()
-
-	if err = system.Modify(ctx, request); err != nil {
-		log.Printf("ModifyComputeSystem failed, err = %v", err)
+		log.Printf("hcs.CreateComputeSystem failed: err = %v", err)
 		return
 	}
 
-	log.Printf("Waiting for ModifyComputeSystem complete...")
-	system.Wait()
+	if err = system.Start(ctx); err != nil {
+		log.Printf("system.Start failed: err = %v", err)
+		system.Close()
+		return
+	}
 
-	log.Printf("ModifyComputeSystem Succeeded")
-	return
+	log.Printf("bootComputeSystem Succeeded")
+	return system, err
 }
