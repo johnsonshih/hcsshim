@@ -1,0 +1,8 @@
+{
+    "ResourcePath": "VirtualMachine/Devices/NetworkAdapters/1008f635-03fd-4c0c-828e-72d27376f0bd",
+    "RequestType": "Add",
+    "Settings": {
+        "EndpointId": "1008f635-03fd-4c0c-828e-72d27376f0bd",
+        "MacAddress": "00-15-5D-22-1A-A2"
+    }
+}
