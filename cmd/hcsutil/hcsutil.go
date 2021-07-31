@@ -142,6 +142,17 @@ func bootComputeSystem(vmName string, jsonFileName string) (_ *hcs.System, err e
 		return
 	}
 
+	scsiDevs := request.VirtualMachine.Devices.Scsi
+	for _, scsiDev := range scsiDevs {
+		for _, disk := range scsiDev.Attachments {
+			diskPath := disk.Path
+			if err = wclayer.GrantVmAccess(vmName, diskPath); err != nil {
+				log.Printf("GrantVmAccess path = %s to vm %s failed, err = %v", diskPath, vmName, err)
+				return
+			}
+		}
+	}
+
 	system, err := hcs.CreateComputeSystem(ctx, vmName, request)
 	if err != nil {
 		log.Printf("hcs.CreateComputeSystem failed: err = %v", err)
