@@ -1,1 +1,4 @@
 *.exe
+
+# Visual Studio code cache/options directory
+.vscode/
