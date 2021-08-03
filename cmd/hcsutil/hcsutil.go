@@ -60,9 +60,6 @@ func modifyComputeSystem(vmName string, jsonFileName string) (err error) {
 		return
 	}
 
-	log.Printf("Waiting for ModifyComputeSystem complete...")
-	system.Wait()
-
 	log.Printf("ModifyComputeSystem Succeeded")
 	return
 }
