@@ -125,7 +125,6 @@ type HcnServiceWatcher struct {
 
 type HcnNetworkWatcher struct {
 	handleLock     sync.RWMutex
-	network        hcnNetwork
 	callbackNumber uintptr
 	watcherContext *notifcationWatcherContext
 	started        bool
@@ -249,6 +248,10 @@ func (w *HcnNetworkWatcher) Start(networkId string) error {
 	var networkHandle hcnNetwork
 	var resultBuffer *uint16
 	networkGuid, err := guid.FromString(networkId)
+	if err != nil {
+		return errInvalidNetworkID
+	}
+
 	hr := hcnOpenNetwork(&networkGuid, &networkHandle, &resultBuffer)
 	if err = checkForErrors("hcnOpenNetwork", hr, resultBuffer); err != nil {
 		return err
