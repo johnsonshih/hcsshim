@@ -415,15 +415,22 @@ func GetNetworkByID(networkID string) (*HostComputeNetwork, error) {
 		return nil, err
 	}
 	hcnQuery.Filter = string(filter)
-
-	networks, err := ListNetworksQuery(hcnQuery)
+	queryJson, err := json.Marshal(hcnQuery)
 	if err != nil {
 		return nil, err
 	}
-	if len(networks) == 0 {
-		return nil, NetworkNotFoundError{NetworkID: networkID}
+
+	networkGuid, err := guid.FromString(networkID)
+	if err != nil {
+		return nil, err
 	}
-	return &networks[0], err
+
+	network, err := getNetwork(networkGuid, string(queryJson))
+	if err != nil {
+		return nil, err
+	}
+
+	return network, err
 }
 
 // GetNetworkByName returns the network specified by Name.
