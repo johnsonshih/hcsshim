@@ -209,6 +209,23 @@ func HasVirtualMachine(id string) bool {
 	return true
 }
 
+// HasVirtualMachineWithError
+func HasVirtualMachineWithError(id string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+	system, err := hcs.OpenComputeSystem(ctx, id)
+	if err != nil {
+		if hcs.IsNotExist(err) {
+			return false, nil
+		} else {
+			return true, err
+		}
+	}
+	defer system.Close()
+
+	return true, nil
+}
+
 // List all/specified Virtual Machine
 func ListVirtualMachines(id string) ([]*VirtualMachineSpec, error) {
 
