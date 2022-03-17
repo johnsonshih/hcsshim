@@ -44,19 +44,20 @@ const (
 )
 
 type VirtualMachineOptions struct {
-	Name                 string
-	Id                   string
-	VhdPath              string
-	IsoPath              string
-	Owner                string
-	MemoryInMB           int32
-	ProcessorCount       int32
-	VnicId               string
-	MacAddress           string
-	UseGuestConnection   bool
-	AllowOvercommit      bool
-	SecureBootEnabled    bool
-	SecureBootTemplateId string
+	Name                    string
+	Id                      string
+	VhdPath                 string
+	IsoPath                 string
+	Owner                   string
+	MemoryInMB              int32
+	ProcessorCount          int32
+	VnicId                  string
+	MacAddress              string
+	UseGuestConnection      bool
+	GuestConnectionUseVsock bool
+	AllowOvercommit         bool
+	SecureBootEnabled       bool
+	SecureBootTemplateId    string
 }
 
 const plan9Port = 564
@@ -134,7 +135,7 @@ func CreateVirtualMachineSpec(opts *VirtualMachineOptions) (*VirtualMachineSpec,
 
 	if opts.UseGuestConnection {
 		spec.VirtualMachine.GuestConnection = &hcsschema.GuestConnection{
-			UseVsock:            true,
+			UseVsock:            opts.GuestConnectionUseVsock,
 			UseConnectedSuspend: true,
 		}
 	}
