@@ -10,11 +10,7 @@ import (
 	hcsschema "github.com/Microsoft/hcsshim/internal/schema2"
 )
 
-type SupportedSchemaVersionsStruct struct {
-	SupportedSchemaVersions []hcsschema.Version `json:"SupportedSchemaVersions,omitempty"`
-}
-
-func GetHcsSchemaVersion() (schemaVersion *hcsschema.Version, err error) {
+func GetHighestSupportedHcsSchemaVersion() (schemaVersion *hcsschema.Version, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
@@ -23,12 +19,12 @@ func GetHcsSchemaVersion() (schemaVersion *hcsschema.Version, err error) {
 		return nil, fmt.Errorf("failed to retrieve HCS schema version: %s", err)
 	}
 
-	supportedSchemaVersions := &SupportedSchemaVersionsStruct{}
-	if err := json.Unmarshal(serviceProperties.Properties[0], &supportedSchemaVersions); err != nil {
+	basicInfo := &hcsschema.BasicInformation{}
+	if err := json.Unmarshal(serviceProperties.Properties[0], &basicInfo); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal HCS Schema Version: %s", err)
 	}
 
-	schemaVersion = &supportedSchemaVersions.SupportedSchemaVersions[0]
+	schemaVersion = &basicInfo.SupportedSchemaVersions[0]
 
 	return
 }

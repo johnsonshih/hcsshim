@@ -20,7 +20,7 @@ func GetServiceProperties(ctx context.Context, q hcsschema.PropertyQuery) (prope
 	}
 
 	var resultp, propertiesp *uint16
-	err = hcsGetServicePropertiesContext(ctx, string(queryb), &propertiesp, &resultp)
+	err = hcsGetServicePropertiesSync(ctx, string(queryb), &propertiesp, &resultp)
 	events := processHcsResult(ctx, resultp)
 	if err != nil {
 		return nil, &HcsError{Op: operation, Err: err, Events: events}
