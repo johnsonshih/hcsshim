@@ -292,15 +292,6 @@ func hcsGetServicePropertiesContext(ctx gcontext.Context, propertyQuery string, 
 	})
 }
 
-func hcsGetServicePropertiesSync(ctx gcontext.Context, propertyQuery string, properties **uint16, result **uint16) (hr error) {
-	ctx, span := trace.StartSpan(ctx, "HcsGetServicePropertiesSync")
-	defer span.End()
-	defer func() { oc.SetSpanStatus(span, hr) }()
-	span.AddAttributes(trace.StringAttribute("propertyQuery", propertyQuery))
-
-	return hcsGetServiceProperties(propertyQuery, properties, result)
-}
-
 func hcsRegisterProcessCallbackContext(ctx gcontext.Context, process hcsProcess, callback uintptr, context uintptr, callbackHandle *hcsCallback) (hr error) {
 	ctx, span := trace.StartSpan(ctx, "HcsRegisterProcessCallback")
 	defer span.End()
