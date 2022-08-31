@@ -24,6 +24,12 @@ func GetHighestSupportedHcsSchemaVersion() (schemaVersion *hcsschema.Version, er
 		return nil, fmt.Errorf("failed to unmarshal HCS Schema Version: %s", err)
 	}
 
+	for j := 1; j < len(basicInfo.SupportedSchemaVersions); j++ {
+		if basicInfo.SupportedSchemaVersions[0].Major < basicInfo.SupportedSchemaVersions[j].Major {
+			basicInfo.SupportedSchemaVersions[0] = basicInfo.SupportedSchemaVersions[j]
+		}
+	}
+
 	schemaVersion = &basicInfo.SupportedSchemaVersions[0]
 
 	return
