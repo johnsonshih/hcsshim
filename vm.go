@@ -63,6 +63,7 @@ type VirtualMachineOptions struct {
 	SecureBootTemplateId    string
 	HighMmioBaseInMB        int32
 	HighMmioGapInMB         int32
+	DataVhdPaths            []string
 }
 
 const plan9Port = 564
@@ -82,6 +83,12 @@ func CreateVirtualMachineSpec(opts *VirtualMachineOptions) (*VirtualMachineSpec,
 	}
 	if err := wclayer.GrantVmAccess(opts.Id, opts.IsoPath); err != nil {
 		return nil, err
+	}
+
+	for _, dataVhdPath := range opts.DataVhdPaths {
+		if err := wclayer.GrantVmAccess(opts.Id, dataVhdPath); err != nil {
+			return nil, err
+		}
 	}
 
 	// determine which schema version to use
@@ -129,6 +136,16 @@ func CreateVirtualMachineSpec(opts *VirtualMachineOptions) (*VirtualMachineSpec,
 				Plan9:           &hcsschema.Plan9{},
 			},
 		},
+	}
+	numberofdisk := len(spec.VirtualMachine.Devices.Scsi["primary"].Attachments)
+	for index, dataVhdPath := range opts.DataVhdPaths {
+		datavhdAttachment := hcsschema.Attachment{
+			Path:  dataVhdPath,
+			Type_: "VirtualDisk",
+		}
+
+		indexKey := fmt.Sprint(numberofdisk + index)
+		spec.VirtualMachine.Devices.Scsi["primary"].Attachments[indexKey] = datavhdAttachment
 	}
 
 	if len(opts.VnicId) > 0 {
