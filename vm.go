@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,6 +64,7 @@ type VirtualMachineOptions struct {
 	SecureBootTemplateId    string
 	HighMmioBaseInMB        int32
 	HighMmioGapInMB         int32
+	DataVhdPaths            []string
 }
 
 const plan9Port = 564
@@ -82,6 +84,11 @@ func CreateVirtualMachineSpec(opts *VirtualMachineOptions) (*VirtualMachineSpec,
 	}
 	if err := wclayer.GrantVmAccess(opts.Id, opts.IsoPath); err != nil {
 		return nil, err
+	}
+	for _, vhdPath := range opts.DataVhdPaths {
+		if err := wclayer.GrantVmAccess(opts.Id, vhdPath); err != nil {
+			return nil, err
+		}
 	}
 
 	// determine which schema version to use
@@ -129,6 +136,17 @@ func CreateVirtualMachineSpec(opts *VirtualMachineOptions) (*VirtualMachineSpec,
 				Plan9:           &hcsschema.Plan9{},
 			},
 		},
+	}
+
+	numberofdisk := len(spec.VirtualMachine.Devices.Scsi["primary"].Attachments)
+	for index, dataVhdPath := range opts.DataVhdPaths {
+		datavhdAttachment := hcsschema.Attachment{
+			Path:  dataVhdPath,
+			Type_: "VirtualDisk",
+		}
+
+		indexKey := fmt.Sprint(numberofdisk + index)
+		spec.VirtualMachine.Devices.Scsi["primary"].Attachments[indexKey] = datavhdAttachment
 	}
 
 	if len(opts.VnicId) > 0 {
@@ -730,4 +748,72 @@ func getSchemaVersion(opts *VirtualMachineOptions) hcsschema.Version {
 		Major: 2,
 		Minor: 1,
 	}
+}
+
+func (vm *VirtualMachineSpec) GetDiskInformation(diskPath string) (controlNumber int, err error) {
+	for key, value := range vm.spec.VirtualMachine.Devices.Scsi["primary"].Attachments {
+		if value.Path == diskPath {
+			controlNumber, err = strconv.Atoi(key)
+			return
+		}
+	}
+
+	return 0, errors.New("diskpath not found in attached devices")
+}
+
+func (vm *VirtualMachineSpec) AttachVhd(vhdPath string) (lun int, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
+	if err != nil {
+		return 0, err
+	}
+	defer system.Close()
+
+	if err := wclayer.GrantVmAccess(vm.ID, vhdPath); err != nil {
+		return 0, err
+	}
+
+	for lun := 0; lun < 256; lun++ {
+		request := hcsschema.ModifySettingRequest{
+			RequestType:  requesttype.Add,
+			ResourcePath: fmt.Sprintf("VirtualMachine/Devices/Scsi/Primary/Attachments/%d", lun),
+			Settings: hcsschema.Attachment{
+				Type_: "VirtualDisk",
+				Path:  vhdPath,
+			},
+		}
+		if err = system.Modify(ctx, request); err != nil {
+			// error caused by lun collision
+			if strings.Contains(err.Error(), "Unspecified error") {
+				continue
+			} else {
+				return 0, err
+			}
+		} else {
+			return lun, nil
+		}
+	}
+
+	return 0, errors.New("No available LUN for disk to be attached")
+}
+
+func (vm *VirtualMachineSpec) DetachVhd(lun int) (err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
+	if err != nil {
+		return err
+	}
+	defer system.Close()
+
+	request := hcsschema.ModifySettingRequest{
+		RequestType:  requesttype.Remove,
+		ResourcePath: fmt.Sprintf("VirtualMachine/Devices/Scsi/Primary/Attachments/%d", lun),
+	}
+	if err = system.Modify(ctx, request); err != nil {
+		return err
+	}
+
+	return nil
 }
