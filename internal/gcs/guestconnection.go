@@ -148,6 +148,27 @@ func (gc *GuestConnection) Modify(ctx context.Context, settings interface{}) err
 	return gc.brdg.RPC(ctx, rpcModifySettings, &req, &resp, false)
 }
 
+// Prototype for shutdown through gcs directly
+func (gc *GuestConnection) Shutdown(ctx context.Context, id string) error {
+	req := makeRequest(id)
+	var resp responseBase
+	err := gc.brdg.RPC(ctx, rpcShutdownGraceful, &req, &resp, true)
+	if err != nil {
+		if uint32(resp.Result) != hrComputeSystemDoesNotExist {
+			return err
+		}
+		//select {
+		//case <-c.notifyCh:
+		//default:
+		//log.G(ctx).WithFields(logrus.Fields{
+		//	logrus.ErrorKey:       err,
+		//	logfields.ContainerID: c.id,
+		//}).Warn("ignoring missing container")
+		//}
+	}
+	return nil
+}
+
 // Close terminates the guest connection. It is undefined to call any other
 // methods on the connection after this is called.
 func (gc *GuestConnection) Close() error {
