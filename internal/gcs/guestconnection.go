@@ -148,6 +148,24 @@ func (gc *GuestConnection) Modify(ctx context.Context, settings interface{}) err
 	return gc.brdg.RPC(ctx, rpcModifySettings, &req, &resp, false)
 }
 
+// Shutdown the null container (container host) with specified option
+func (gc *GuestConnection) Shutdown(ctx context.Context, force bool) error {
+	rpcProc := rpcShutdownGraceful
+	if force {
+		rpcProc = rpcShutdownForced
+	}
+
+	req := makeRequest(nullContainerID)
+	var resp responseBase
+	err := gc.brdg.RPC(ctx, rpcProc, &req, &resp, true)
+	if err != nil {
+		if uint32(resp.Result) != hrComputeSystemDoesNotExist {
+			return err
+		}
+	}
+	return nil
+}
+
 // Close terminates the guest connection. It is undefined to call any other
 // methods on the connection after this is called.
 func (gc *GuestConnection) Close() error {

@@ -366,6 +366,12 @@ func (vm *VirtualMachineSpec) Start() error {
 func (vm *VirtualMachineSpec) Stop(force bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
+
+	if vm.gc != nil {
+		// external guest connection used, shutdown through the external gcs
+		return vm.shutdownThroughGuestConnection(ctx, force)
+	}
+
 	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
 	if err != nil {
 		return err
@@ -767,6 +773,10 @@ func (vm *VirtualMachineSpec) String() string {
 	}
 
 	return string(jsonString)
+}
+
+func (vm *VirtualMachineSpec) shutdownThroughGuestConnection(ctx context.Context, force bool) (err error) {
+	return vm.gc.Shutdown(ctx, force)
 }
 
 func (vm *VirtualMachineSpec) modifySetting(ctx context.Context, doc *hcsschema.ModifySettingRequest) (err error) {
