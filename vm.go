@@ -6,19 +6,25 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"path"
 	"strings"
 	"time"
 
+	"github.com/Microsoft/go-winio"
 	"github.com/Microsoft/go-winio/pkg/guid"
 	"github.com/Microsoft/hcsshim/hcn"
+	"github.com/Microsoft/hcsshim/internal/gcs"
 	"github.com/Microsoft/hcsshim/internal/guestrequest"
 	"github.com/Microsoft/hcsshim/internal/hcs"
+	"github.com/Microsoft/hcsshim/internal/log"
+	"github.com/Microsoft/hcsshim/internal/logfields"
 	"github.com/Microsoft/hcsshim/internal/requesttype"
 	"github.com/Microsoft/hcsshim/internal/schema1"
 	hcsschema "github.com/Microsoft/hcsshim/internal/schema2"
 	"github.com/Microsoft/hcsshim/internal/wclayer"
 	"github.com/Microsoft/hcsshim/osversion"
+	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/windows"
 )
 
@@ -57,6 +63,7 @@ type VirtualMachineOptions struct {
 	VnicId                  string
 	MacAddress              string
 	UseGuestConnection      bool
+	ExternalGuestConnection bool // sets whether the guest RPC connection is performed internally by the OS platform or externally by this package.
 	GuestConnectionUseVsock bool
 	AllowOvercommit         bool
 	SecureBootEnabled       bool
@@ -68,11 +75,18 @@ type VirtualMachineOptions struct {
 const plan9Port = 564
 
 type VirtualMachineSpec struct {
-	Name      string
-	ID        string
-	runtimeId string
-	spec      *hcsschema.ComputeSystem
-	system    *hcs.System
+	Name       string
+	ID         string
+	runtimeId  guid.GUID
+	spec       *hcsschema.ComputeSystem
+	system     *hcs.System
+	extGcs     bool
+	gcListener net.Listener         // The GCS connection listener
+	gc         *gcs.GuestConnection // The GCS connection
+
+	// GCS bridge protocol and capabilities
+	protocol  uint32
+	guestCaps schema1.GuestDefinedCapabilities
 }
 
 func CreateVirtualMachineSpec(opts *VirtualMachineOptions) (*VirtualMachineSpec, error) {
@@ -139,9 +153,21 @@ func CreateVirtualMachineSpec(opts *VirtualMachineOptions) (*VirtualMachineSpec,
 	}
 
 	if opts.UseGuestConnection {
-		spec.VirtualMachine.GuestConnection = &hcsschema.GuestConnection{
-			UseVsock:            opts.GuestConnectionUseVsock,
-			UseConnectedSuspend: true,
+		if !opts.ExternalGuestConnection {
+			// gcs connects to hcs (internal)
+			spec.VirtualMachine.GuestConnection = &hcsschema.GuestConnection{
+				UseVsock:            opts.GuestConnectionUseVsock,
+				UseConnectedSuspend: true,
+			}
+		} else {
+			// gcs connects to hcsshim (external)
+			// Allow administrators and SYSTEM to bind to vsock sockets
+			// so that we can create GCS sockets.
+			spec.VirtualMachine.Devices.HvSocket = &hcsschema.HvSocket2{
+				HvSocketConfig: &hcsschema.HvSocketSystemConfig{
+					DefaultBindSecurityDescriptor: "D:P(A;;FA;;;SY)(A;;FA;;;BA)",
+				},
+			}
 		}
 	}
 
@@ -159,9 +185,10 @@ func CreateVirtualMachineSpec(opts *VirtualMachineOptions) (*VirtualMachineSpec,
 	}
 
 	return &VirtualMachineSpec{
-		spec: spec,
-		ID:   opts.Id,
-		Name: opts.Name,
+		spec:   spec,
+		ID:     opts.Id,
+		Name:   opts.Name,
+		extGcs: opts.UseGuestConnection && opts.ExternalGuestConnection,
 	}, nil
 }
 
@@ -274,8 +301,15 @@ func (vm *VirtualMachineSpec) Create() error {
 		return err
 	}
 
-	vm.runtimeId = properties.RuntimeID.String()
+	vm.runtimeId = properties.RuntimeID
 	vm.system = system
+	if vm.extGcs {
+		l, err := vm.listenVsock(gcs.LinuxGcsVsockPort)
+		if err != nil {
+			return err
+		}
+		vm.gcListener = l
+	}
 
 	return nil
 }
@@ -290,13 +324,54 @@ func (vm *VirtualMachineSpec) Start() error {
 	}
 	defer system.Close()
 
-	return system.Start(ctx)
+	err = system.Start(ctx)
+	if err != nil {
+		return err
+	}
+
+	if vm.gcListener != nil {
+		// Accept the GCS connection.
+		conn, err := vm.acceptAndClose(ctx, vm.gcListener)
+		vm.gcListener = nil
+		if err != nil {
+			return fmt.Errorf("failed to connect to GCS: %s", err)
+		}
+
+		// Start the GCS protocol.
+		gcc := &gcs.GuestConnectionConfig{
+			Conn:     conn,
+			Log:      logrus.WithField(logfields.UVMID, vm.ID),
+			IoListen: gcs.HvsockIoListen(vm.runtimeId),
+		}
+		vm.gc, err = gcc.Connect(ctx)
+		if err != nil {
+			return err
+		}
+		vm.guestCaps = *vm.gc.Capabilities()
+		vm.protocol = vm.gc.Protocol()
+	} else {
+		// Get the guest connection properties from compute system
+		properties, err := vm.system.Properties(ctx, schema1.PropertyTypeGuestConnection)
+		if err != nil {
+			return err
+		}
+		vm.guestCaps = properties.GuestConnectionInfo.GuestDefinedCapabilities
+		vm.protocol = properties.GuestConnectionInfo.ProtocolVersion
+	}
+
+	return nil
 }
 
 // Stop a Virtual Machine
 func (vm *VirtualMachineSpec) Stop(force bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
+
+	if vm.gc != nil {
+		// external guest connection used, shutdown through the external gcs
+		return vm.shutdownThroughGuestConnection(ctx, force)
+	}
+
 	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
 	if err != nil {
 		return err
@@ -460,7 +535,7 @@ func (vm *VirtualMachineSpec) HotDetachEndpoint(endpoint *hcn.HostComputeEndpoin
 	defer system.Close()
 
 	// Hot detach an endpoint from the compute system
-	request := hcsschema.ModifySettingRequest{
+	request := &hcsschema.ModifySettingRequest{
 		RequestType:  requesttype.Remove,
 		ResourcePath: path.Join("VirtualMachine/Devices/NetworkAdapters", endpoint.Id),
 		Settings: hcsschema.NetworkAdapter{
@@ -469,7 +544,7 @@ func (vm *VirtualMachineSpec) HotDetachEndpoint(endpoint *hcn.HostComputeEndpoin
 		},
 	}
 
-	if err = system.Modify(ctx, request); err != nil {
+	if err = vm.modifySetting(ctx, request); err != nil {
 		return err
 	}
 
@@ -478,7 +553,7 @@ func (vm *VirtualMachineSpec) HotDetachEndpoint(endpoint *hcn.HostComputeEndpoin
 
 func (vm *VirtualMachineSpec) hotAttachEndpoint(ctx context.Context, system *hcs.System, endpoint *hcn.HostComputeEndpoint) (err error) {
 	// Hot attach an endpoint to the compute system
-	request := hcsschema.ModifySettingRequest{
+	request := &hcsschema.ModifySettingRequest{
 		RequestType:  requesttype.Add,
 		ResourcePath: path.Join("VirtualMachine/Devices/NetworkAdapters", endpoint.Id),
 		Settings: hcsschema.NetworkAdapter{
@@ -487,7 +562,7 @@ func (vm *VirtualMachineSpec) hotAttachEndpoint(ctx context.Context, system *hcs
 		},
 	}
 
-	if err = system.Modify(ctx, request); err != nil {
+	if err = vm.modifySetting(ctx, request); err != nil {
 		return err
 	}
 
@@ -542,7 +617,7 @@ func (vm *VirtualMachineSpec) AddPlan9(shareName string, hostPath string, uvmPat
 			Flags:        flags,
 			AllowedFiles: allowedNames,
 		},
-		ResourcePath: fmt.Sprintf("VirtualMachine/Devices/Plan9/Shares"),
+		ResourcePath: "VirtualMachine/Devices/Plan9/Shares",
 		GuestRequest: guestrequest.GuestRequest{
 			ResourceType: guestrequest.ResourceTypeMappedDirectory,
 			RequestType:  requesttype.Add,
@@ -555,7 +630,7 @@ func (vm *VirtualMachineSpec) AddPlan9(shareName string, hostPath string, uvmPat
 		},
 	}
 
-	if err := system.Modify(ctx, modification); err != nil {
+	if err := vm.modifySetting(ctx, modification); err != nil {
 		return err
 	}
 
@@ -579,7 +654,7 @@ func (vm *VirtualMachineSpec) RemovePlan9(shareName string, uvmPath string) (err
 			AccessName: shareName,
 			Port:       plan9Port,
 		},
-		ResourcePath: fmt.Sprintf("VirtualMachine/Devices/Plan9/Shares"),
+		ResourcePath: "VirtualMachine/Devices/Plan9/Shares",
 		GuestRequest: guestrequest.GuestRequest{
 			ResourceType: guestrequest.ResourceTypeMappedDirectory,
 			RequestType:  requesttype.Remove,
@@ -590,7 +665,7 @@ func (vm *VirtualMachineSpec) RemovePlan9(shareName string, uvmPath string) (err
 			},
 		},
 	}
-	if err := system.Modify(ctx, modification); err != nil {
+	if err := vm.modifySetting(ctx, modification); err != nil {
 		return fmt.Errorf("failed to remove plan9 share %s from %s: %+v: %s", shareName, vm.ID, modification, err)
 	}
 	return nil
@@ -615,13 +690,13 @@ func (vm *VirtualMachineSpec) UpdateGpuConfiguration(mode GpuAssignmentMode, all
 		settings.AssignmentRequest = assignments
 	}
 
-	request := hcsschema.ModifySettingRequest{
+	request := &hcsschema.ModifySettingRequest{
 		RequestType:  requesttype.Update,
 		ResourcePath: "VirtualMachine/ComputeTopology/Gpu",
 		Settings:     settings,
 	}
 
-	if err := system.Modify(ctx, request); err != nil {
+	if err := vm.modifySetting(ctx, request); err != nil {
 		return err
 	}
 
@@ -666,7 +741,7 @@ func (vm *VirtualMachineSpec) AssignDevice(ctx context.Context, deviceID string)
 		},
 	}
 
-	if err := system.Modify(ctx, request); err != nil {
+	if err := vm.modifySetting(ctx, request); err != nil {
 		return "", err
 	}
 
@@ -685,11 +760,10 @@ func (vm *VirtualMachineSpec) RemoveDevice(ctx context.Context, vmBusGUID string
 
 	defer system.Close()
 
-	return system.Modify(ctx, &hcsschema.ModifySettingRequest{
+	return vm.modifySetting(ctx, &hcsschema.ModifySettingRequest{
 		ResourcePath: fmt.Sprintf("VirtualMachine/Devices/VirtualPci/%s", vmBusGUID),
 		RequestType:  requesttype.Remove,
 	})
-	return nil
 }
 
 func (vm *VirtualMachineSpec) String() string {
@@ -699,6 +773,86 @@ func (vm *VirtualMachineSpec) String() string {
 	}
 
 	return string(jsonString)
+}
+
+func (vm *VirtualMachineSpec) shutdownThroughGuestConnection(ctx context.Context, force bool) (err error) {
+	return vm.gc.Shutdown(ctx, force)
+}
+
+func (vm *VirtualMachineSpec) modifySetting(ctx context.Context, doc *hcsschema.ModifySettingRequest) (err error) {
+	if doc.GuestRequest == nil || vm.gc == nil {
+		return vm.system.Modify(ctx, doc)
+	}
+
+	hostdoc := *doc
+	hostdoc.GuestRequest = nil
+	if doc.ResourcePath != "" && doc.RequestType == requesttype.Add {
+		err = vm.system.Modify(ctx, &hostdoc)
+		if err != nil {
+			return fmt.Errorf("adding VM resources: %s", err)
+		}
+		defer func() {
+			if err != nil {
+				hostdoc.RequestType = requesttype.Remove
+				rerr := vm.system.Modify(ctx, &hostdoc)
+				if rerr != nil {
+					log.G(ctx).WithError(err).Error("failed to roll back resource add")
+				}
+			}
+		}()
+	}
+	err = vm.gc.Modify(ctx, doc.GuestRequest)
+	if err != nil {
+		return fmt.Errorf("guest modify: %s", err)
+	}
+	if doc.ResourcePath != "" && doc.RequestType == requesttype.Remove {
+		err = vm.system.Modify(ctx, &hostdoc)
+		if err != nil {
+			err = fmt.Errorf("removing VM resources: %s", err)
+			log.G(ctx).WithError(err).Error("failed to remove host resources after successful guest request")
+			return err
+		}
+	}
+	return nil
+}
+
+func (vm *VirtualMachineSpec) listenVsock(port uint32) (net.Listener, error) {
+	return winio.ListenHvsock(&winio.HvsockAddr{
+		VMID:      vm.runtimeId,
+		ServiceID: winio.VsockServiceID(port),
+	})
+}
+
+// acceptAndClose accepts a connection and then closes a listener. If the
+// context becomes done or the VM terminates, the operation will be
+// cancelled (but the listener will still be closed).
+func (vm *VirtualMachineSpec) acceptAndClose(ctx context.Context, l net.Listener) (net.Conn, error) {
+	var conn net.Conn
+	ch := make(chan error)
+	go func() {
+		var err error
+		conn, err = l.Accept()
+		ch <- err
+	}()
+
+	select {
+	case err := <-ch:
+		l.Close()
+		return conn, err
+	case <-ctx.Done():
+	}
+	l.Close()
+	err := <-ch
+	if err == nil {
+		return conn, err
+	}
+
+	// Prefer context error to VM error to accept error in order to return the
+	// most useful error.
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return nil, err
 }
 
 func generateShutdownOptions(force bool) (string, error) {
