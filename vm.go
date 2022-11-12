@@ -444,8 +444,12 @@ func (vm *VirtualMachineSpec) RunCommand(command []string, user string) (exitCod
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
+	vmOs, err := vm.OS()
+	if err != nil {
+		return
+	}
 	var params *hcsschema.ProcessParameters
-	switch vm.OS() {
+	switch vmOs {
 	case "linux":
 		params = &hcsschema.ProcessParameters{
 			CommandArgs:      command,
@@ -759,11 +763,23 @@ func (vm *VirtualMachineSpec) RemoveDevice(ctx context.Context, vmBusGUID string
 	})
 }
 
-func (vm *VirtualMachineSpec) OS() string {
+func (vm *VirtualMachineSpec) OS() (string, error) {
 	if vm.gc == nil {
-		return vm.system.OS()
+		// The properties of hcs.System are set when hcs.System is created and never refresh
+		// cannot use vm.system as vm.system was created at vm.Create() and doesn't have up-to-date properties
+		// get the properties from a fresh hcs.System
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+		defer cancel()
+
+		system, err := hcs.OpenComputeSystem(ctx, vm.ID)
+		if err != nil {
+			return "", err
+		}
+		defer system.Close()
+
+		return system.OS(), nil
 	} else {
-		return vm.gc.OS()
+		return vm.gc.OS(), nil
 	}
 }
 
