@@ -14,6 +14,7 @@ import (
 	"github.com/Microsoft/go-winio"
 	"github.com/Microsoft/go-winio/pkg/guid"
 	"github.com/Microsoft/hcsshim/hcn"
+	"github.com/Microsoft/hcsshim/internal/cow"
 	"github.com/Microsoft/hcsshim/internal/gcs"
 	"github.com/Microsoft/hcsshim/internal/guestrequest"
 	"github.com/Microsoft/hcsshim/internal/hcs"
@@ -443,16 +444,8 @@ func (vm *VirtualMachineSpec) RunCommand(command []string, user string) (exitCod
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
-	exitCode = 1
-
-	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
-	if err != nil {
-		return exitCode, "", "", err
-	}
-	defer system.Close()
-
 	var params *hcsschema.ProcessParameters
-	switch system.OS() {
+	switch vm.OS() {
 	case "linux":
 		params = &hcsschema.ProcessParameters{
 			CommandArgs:      command,
@@ -475,19 +468,19 @@ func (vm *VirtualMachineSpec) RunCommand(command []string, user string) (exitCod
 			ConsoleSize:      []int32{0, 0},
 		}
 	default:
-		return exitCode, "", "", ErrNotSupported
-	}
-
-	process, err := system.CreateProcess(ctx, params)
-	if err != nil {
+		err = ErrNotSupported
 		return
 	}
 
+	process, err := vm.createProcess(ctx, params)
+	if err != nil {
+		return
+	}
 	defer process.Close()
 
 	err = process.Wait()
 	if err != nil {
-		return exitCode, "Wait returned error!", "", err
+		return
 	}
 
 	exitCode, err = process.ExitCode()
@@ -766,6 +759,14 @@ func (vm *VirtualMachineSpec) RemoveDevice(ctx context.Context, vmBusGUID string
 	})
 }
 
+func (vm *VirtualMachineSpec) OS() string {
+	if vm.gc == nil {
+		return vm.system.OS()
+	} else {
+		return vm.gc.OS()
+	}
+}
+
 func (vm *VirtualMachineSpec) String() string {
 	jsonString, err := json.Marshal(vm.spec)
 	if err != nil {
@@ -814,6 +815,14 @@ func (vm *VirtualMachineSpec) modifySetting(ctx context.Context, doc *hcsschema.
 		}
 	}
 	return nil
+}
+
+func (vm *VirtualMachineSpec) createProcess(ctx context.Context, c interface{}) (_ cow.Process, err error) {
+	if vm.gc == nil {
+		return vm.system.CreateProcess(ctx, c)
+	} else {
+		return vm.gc.CreateProcess(ctx, c)
+	}
 }
 
 func (vm *VirtualMachineSpec) listenVsock(port uint32) (net.Listener, error) {
