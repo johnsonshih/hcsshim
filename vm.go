@@ -763,6 +763,25 @@ func (vm *VirtualMachineSpec) RemoveDevice(ctx context.Context, vmBusGUID string
 	})
 }
 
+func (vm *VirtualMachineSpec) GetState() (state string, stopped bool, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+
+	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
+	if err != nil {
+		stopped = true
+		return
+	}
+	defer system.Close()
+
+	properties, err := system.Properties(ctx)
+	if err != nil {
+		stopped = true
+		return
+	}
+	return properties.State, properties.Stopped, nil
+}
+
 func (vm *VirtualMachineSpec) OS() (string, error) {
 	if vm.gc == nil {
 		// The properties of hcs.System are set when hcs.System is created and never refresh
