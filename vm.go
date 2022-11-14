@@ -712,14 +712,7 @@ func (vm *VirtualMachineSpec) GetState() (state string, stopped bool, err error)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
-	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
-	if err != nil {
-		stopped = true
-		return
-	}
-	defer system.Close()
-
-	properties, err := system.Properties(ctx)
+	properties, err := vm.system.Properties(ctx)
 	if err != nil {
 		stopped = true
 		return
