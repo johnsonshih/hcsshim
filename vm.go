@@ -319,13 +319,8 @@ func (vm *VirtualMachineSpec) Create() error {
 func (vm *VirtualMachineSpec) Start() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
-	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
-	if err != nil {
-		return err
-	}
-	defer system.Close()
 
-	err = system.Start(ctx)
+	err := vm.system.Start(ctx)
 	if err != nil {
 		return err
 	}
@@ -373,18 +368,12 @@ func (vm *VirtualMachineSpec) Stop(force bool) error {
 		return vm.shutdownThroughGuestConnection(ctx, force)
 	}
 
-	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
-	if err != nil {
-		return err
-	}
-	defer system.Close()
-
 	shutdownOptions, err := generateShutdownOptions(force)
 	if err != nil {
 		return err
 	}
 
-	return system.Shutdown(ctx, shutdownOptions)
+	return vm.system.Shutdown(ctx, shutdownOptions)
 }
 
 // Delete a Virtual Machine
@@ -444,8 +433,12 @@ func (vm *VirtualMachineSpec) RunCommand(command []string, user string) (exitCod
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
+	vmOs, err := vm.OS()
+	if err != nil {
+		return
+	}
 	var params *hcsschema.ProcessParameters
-	switch vm.OS() {
+	switch vmOs {
 	case "linux":
 		params = &hcsschema.ProcessParameters{
 			CommandArgs:      command,
@@ -504,14 +497,9 @@ func (vm *VirtualMachineSpec) RunCommand(command []string, user string) (exitCod
 func (vm *VirtualMachineSpec) HotAttachEndpoints(endpoints []*hcn.HostComputeEndpoint) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
-	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
-	if err != nil {
-		return err
-	}
-	defer system.Close()
 
 	for _, endpoint := range endpoints {
-		if err = vm.hotAttachEndpoint(ctx, system, endpoint); err != nil {
+		if err = vm.hotAttachEndpoint(ctx, endpoint); err != nil {
 			return err
 		}
 	}
@@ -521,11 +509,6 @@ func (vm *VirtualMachineSpec) HotAttachEndpoints(endpoints []*hcn.HostComputeEnd
 func (vm *VirtualMachineSpec) HotDetachEndpoint(endpoint *hcn.HostComputeEndpoint) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
-	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
-	if err != nil {
-		return err
-	}
-	defer system.Close()
 
 	// Hot detach an endpoint from the compute system
 	request := &hcsschema.ModifySettingRequest{
@@ -544,7 +527,7 @@ func (vm *VirtualMachineSpec) HotDetachEndpoint(endpoint *hcn.HostComputeEndpoin
 	return nil
 }
 
-func (vm *VirtualMachineSpec) hotAttachEndpoint(ctx context.Context, system *hcs.System, endpoint *hcn.HostComputeEndpoint) (err error) {
+func (vm *VirtualMachineSpec) hotAttachEndpoint(ctx context.Context, endpoint *hcn.HostComputeEndpoint) (err error) {
 	// Hot attach an endpoint to the compute system
 	request := &hcsschema.ModifySettingRequest{
 		RequestType:  requesttype.Add,
@@ -566,12 +549,6 @@ func (vm *VirtualMachineSpec) hotAttachEndpoint(ctx context.Context, system *hcs
 func (vm *VirtualMachineSpec) AddPlan9(shareName string, hostPath string, uvmPath string, readOnly bool, restrict bool, allowedNames []string) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
-
-	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
-	if err != nil {
-		return err
-	}
-	defer system.Close()
 
 	if restrict && osversion.Get().Build < 18328 {
 		return errors.New("single-file mappings are not supported on this build of Windows")
@@ -634,12 +611,6 @@ func (vm *VirtualMachineSpec) RemovePlan9(shareName string, uvmPath string) (err
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
-	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
-	if err != nil {
-		return err
-	}
-	defer system.Close()
-
 	modification := &hcsschema.ModifySettingRequest{
 		RequestType: requesttype.Remove,
 		Settings: hcsschema.Plan9Share{
@@ -668,12 +639,6 @@ func (vm *VirtualMachineSpec) UpdateGpuConfiguration(mode GpuAssignmentMode, all
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 
-	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
-	if err != nil {
-		return err
-	}
-	defer system.Close()
-
 	settings := hcsschema.GpuConfiguration{
 		AssignmentMode:       string(mode),
 		AllowVendorExtension: allowVendorExtension,
@@ -698,12 +663,6 @@ func (vm *VirtualMachineSpec) UpdateGpuConfiguration(mode GpuAssignmentMode, all
 
 // Add vPCI device
 func (vm *VirtualMachineSpec) AssignDevice(ctx context.Context, deviceID string) (string, error) {
-	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
-	if err != nil {
-		return "", err
-	}
-	defer system.Close()
-
 	guid, err := guid.NewV4()
 	if err != nil {
 		return "", err
@@ -743,27 +702,41 @@ func (vm *VirtualMachineSpec) AssignDevice(ctx context.Context, deviceID string)
 
 // Removes a vpci device from VirtualMachineSpec
 func (vm *VirtualMachineSpec) RemoveDevice(ctx context.Context, vmBusGUID string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
-	defer cancel()
-
-	system, err := hcs.OpenComputeSystem(ctx, vm.ID)
-	if err != nil {
-		return err
-	}
-
-	defer system.Close()
-
 	return vm.modifySetting(ctx, &hcsschema.ModifySettingRequest{
 		ResourcePath: fmt.Sprintf("VirtualMachine/Devices/VirtualPci/%s", vmBusGUID),
 		RequestType:  requesttype.Remove,
 	})
 }
 
-func (vm *VirtualMachineSpec) OS() string {
+func (vm *VirtualMachineSpec) GetState() (state string, stopped bool, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+	defer cancel()
+
+	properties, err := vm.system.Properties(ctx)
+	if err != nil {
+		stopped = true
+		return
+	}
+	return properties.State, properties.Stopped, nil
+}
+
+func (vm *VirtualMachineSpec) OS() (string, error) {
 	if vm.gc == nil {
-		return vm.system.OS()
+		// The properties of hcs.System are set when hcs.System is created and never refresh
+		// cannot use vm.system as vm.system was created at vm.Create() and doesn't have up-to-date properties
+		// get the properties from a fresh hcs.System
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
+		defer cancel()
+
+		system, err := hcs.OpenComputeSystem(ctx, vm.ID)
+		if err != nil {
+			return "", err
+		}
+		defer system.Close()
+
+		return system.OS(), nil
 	} else {
-		return vm.gc.OS()
+		return vm.gc.OS(), nil
 	}
 }
 
