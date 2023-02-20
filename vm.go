@@ -708,6 +708,41 @@ func (vm *VirtualMachineSpec) RemoveDevice(ctx context.Context, vmBusGUID string
 	})
 }
 
+func (vm *VirtualMachineSpec) AddFlexIoDevice(ctx context.Context, emulatorId, hostingmode, hostfolder string) (string, error) {
+	guid, err := guid.NewV4()
+	if err != nil {
+		return "", err
+	}
+
+	vmBusGUID := guid.String()
+	cTag := "-TagName " + vmBusGUID
+	cHostFolder := "-RootPath " + hostfolder
+	targetDevice := hcsschema.FlexibleIoDevice{
+		EmulatorId: emulatorId,
+		HostingModel: hostingmode,
+		Configuration: []string{cTag, cHostFolder},
+	}
+	request := &hcsschema.ModifySettingRequest{
+		ResourcePath: fmt.Sprintf("VirtualMachine/Devices/FlexibleIov/%s", vmBusGUID),
+		RequestType:  requesttype.Add,
+		Settings:     targetDevice,
+	}
+
+	if err := vm.modifySetting(ctx, request); err != nil {
+		return "", err
+	}
+
+	return vmBusGUID, nil
+}
+
+// Remove operation is not supported. Implementation provided for completeness!
+func (vm *VirtualMachineSpec) RemoveFlexIoDevice(ctx context.Context, vmBusGUID string) error {
+	return vm.modifySetting(ctx, &hcsschema.ModifySettingRequest{
+		ResourcePath: fmt.Sprintf("VirtualMachine/Devices/FlexibleIov/%s", vmBusGUID),
+		RequestType:  requesttype.Remove,
+	})
+}
+
 func (vm *VirtualMachineSpec) GetState() (state string, stopped bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
